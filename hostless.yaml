@@ -5,4 +5,5 @@ dockerfile_path: "./Dockerfile"
 
 health_check:
   type: http
-  http_path: "/"
+  http_path: "/knight/login"
+  interval_in_seconds: 30
