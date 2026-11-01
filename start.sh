@@ -3,47 +3,66 @@ set -eu
 umask 077
 
 TS_SOCKET="/tmp/tailscaled.sock"
-TS_STATE_DIR="/data/tailscale"
-TS_STATE="$TS_STATE_DIR/tailscaled.state"
-TS_NODE_NAME="hostless-exit-1"
 TS_PID=""
 APP_PID=""
 
 cleanup() {
-  if [ -n "$APP_PID" ]; then kill -TERM "$APP_PID" 2>/dev/null || true; fi
-  if [ -n "$TS_PID" ]; then kill -TERM "$TS_PID" 2>/dev/null || true; fi
-  if [ -n "$APP_PID" ]; then wait "$APP_PID" 2>/dev/null || true; fi
-  if [ -n "$TS_PID" ]; then wait "$TS_PID" 2>/dev/null || true; fi
+  trap - EXIT INT TERM
+
+  if [ -n "$APP_PID" ]; then
+    kill -TERM "$APP_PID" 2>/dev/null || true
+  fi
+
+  if [ -n "$TS_PID" ] && kill -0 "$TS_PID" 2>/dev/null; then
+    echo "TAILSCALE_EPHEMERAL_LOGOUT_BEGIN"
+    tailscale --socket="$TS_SOCKET" logout >/dev/null 2>&1 || true
+    kill -TERM "$TS_PID" 2>/dev/null || true
+  fi
+
+  if [ -n "$APP_PID" ]; then
+    wait "$APP_PID" 2>/dev/null || true
+  fi
+  if [ -n "$TS_PID" ]; then
+    wait "$TS_PID" 2>/dev/null || true
+  fi
+
+  echo "SHUTDOWN_COMPLETE"
 }
-trap cleanup INT TERM EXIT
-
-# Do not create a disposable Tailnet identity. The Hostless volume must be
-# mounted at /data so the same node key survives process restarts and deploys.
-if ! awk '$5 == "/data" { found = 1 } END { exit(found ? 0 : 1) }' /proc/self/mountinfo; then
-  echo "FATAL: PERSISTENT_VOLUME_NOT_MOUNTED at /data; refusing to authenticate with ephemeral state"
-  exit 1
-fi
-
-if ! mkdir -p "$TS_STATE_DIR" || ! (umask 077; : > "$TS_STATE_DIR/.write-test-$$"); then
-  echo "FATAL: PERSISTENT_STATE_PATH_NOT_WRITABLE: $TS_STATE_DIR"
-  exit 1
-fi
-rm -f "$TS_STATE_DIR/.write-test-$$"
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
 if [ -z "${TS_AUTHKEY:-}" ]; then
   echo "FATAL: TS_AUTHKEY is missing"
   exit 1
 fi
 
-if [ "${TS_HOSTNAME:-}" != "$TS_NODE_NAME" ]; then
-  echo "NOTICE: enforcing unique Tailnet hostname $TS_NODE_NAME (TS_HOSTNAME is intentionally not allowed to create a duplicate)"
+if [ -z "${TS_HOSTNAME:-}" ]; then
+  echo "FATAL: TS_HOSTNAME is missing"
+  exit 1
 fi
 
-echo "TAILSCALE_STATE_MODE=persistent PATH=$TS_STATE"
+# Accept a single DNS hostname label only; never substitute a baked-in name.
+case "$TS_HOSTNAME" in
+  *[!A-Za-z0-9-]*|-*|*-)
+    echo "FATAL: TS_HOSTNAME must be a DNS hostname label (letters, digits and hyphens; no leading/trailing hyphen)"
+    exit 1
+    ;;
+esac
+
+TS_HOSTNAME_LENGTH=$(printf '%s' "$TS_HOSTNAME" | wc -c | tr -d '[:space:]')
+if [ "$TS_HOSTNAME_LENGTH" -gt 63 ]; then
+  echo "FATAL: TS_HOSTNAME exceeds 63 characters"
+  exit 1
+fi
+
+echo "TAILSCALE_STATE_MODE=ephemeral-memory no_volume_required"
+echo "TAILSCALE_HOSTNAME_SOURCE=TS_HOSTNAME hostname=$TS_HOSTNAME"
 echo "HOSTLESS_TAILSCALE_USERSPACE_START"
+
+# mem: makes this an ephemeral Tailscale node without writing identity state to disk.
 tailscaled \
   --tun=userspace-networking \
-  --state="$TS_STATE" \
+  --state=mem: \
   --socket="$TS_SOCKET" &
 TS_PID=$!
 
@@ -71,12 +90,11 @@ fi
 echo "TAILSCALE_DAEMON_READY"
 tailscale version
 
-# The reusable auth key is supplied only through Hostless runtime secrets.
-# Keep the name and tag stable; persist the daemon state to reuse this device.
-echo "TAILSCALE_JOIN_BEGIN hostname=$TS_NODE_NAME tag=tag:exit"
+# Credentials are read only from Hostless runtime secrets and never logged.
+echo "TAILSCALE_JOIN_BEGIN hostname=$TS_HOSTNAME tag=tag:exit"
 tailscale --socket="$TS_SOCKET" up \
   --auth-key="$TS_AUTHKEY" \
-  --hostname="$TS_NODE_NAME" \
+  --hostname="$TS_HOSTNAME" \
   --advertise-exit-node \
   --advertise-tags=tag:exit \
   --accept-dns=false \
