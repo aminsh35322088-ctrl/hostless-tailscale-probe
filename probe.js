@@ -16,7 +16,7 @@ function inspectTun() {
       readable: (() => { try { fs.accessSync("/dev/net/tun", fs.constants.R_OK); return true; } catch { return false; } })(),
       writable: (() => { try { fs.accessSync("/dev/net/tun", fs.constants.W_OK); return true; } catch { return false; } })(),
       major: (s.rdev >> 8) & 0xfff,
-      minor: (s.rdev & 0xff) | ((s.rdev >> 12) & 0xfff00),
+      minor: (s.rdev & 0xff) | ((s.rdev >> 12) & 0xfff00)
     };
   } catch (error) {
     return { exists: false, error: error.code || error.message };
@@ -25,19 +25,38 @@ function inspectTun() {
 
 function inspectCapabilities() {
   const status = read("/proc/self/status") || "";
-  const capEff = status.match(/^CapEff:\\s*([0-9a-f]+)$/im)?.[1] || null;
-  let capNetAdmin = false;
-  if (capEff) {
-    try { capNetAdmin = (BigInt("0x" + capEff) & (1n << 12n)) !== 0n; }
-    catch {}
+  const fields = {};
+  for (const line of status.split(/\r?\n/)) {
+    const separator = line.indexOf(":");
+    if (separator > 0) fields[line.slice(0, separator)] = line.slice(separator + 1).trim();
   }
-  return { effectiveHex: capEff, capNetAdmin };
+
+  function hasCapability(mask, bit) {
+    if (!mask) return null;
+    try { return (BigInt("0x" + mask) & (1n << BigInt(bit))) !== 0n; }
+    catch { return null; }
+  }
+
+  return {
+    effectiveHex: fields.CapEff || null,
+    permittedHex: fields.CapPrm || null,
+    boundingHex: fields.CapBnd || null,
+    noNewPrivileges: fields.NoNewPrivs || null,
+    seccomp: fields.Seccomp || null,
+    capNetAdminEffective: hasCapability(fields.CapEff, 12),
+    capNetAdminPermitted: hasCapability(fields.CapPrm, 12),
+    capNetAdminBounding: hasCapability(fields.CapBnd, 12),
+    capMknodEffective: hasCapability(fields.CapEff, 27)
+  };
 }
 
 const report = {
   marker: "HOSTLESS_RUNTIME_PROBE",
   timestamp: new Date().toISOString(),
-  process: { uid: typeof process.getuid === "function" ? process.getuid() : null, gid: typeof process.getgid === "function" ? process.getgid() : null },
+  process: {
+    uid: typeof process.getuid === "function" ? process.getuid() : null,
+    gid: typeof process.getgid === "function" ? process.getgid() : null
+  },
   kernel: { release: os.release(), platform: os.platform(), architecture: os.arch() },
   tun: inspectTun(),
   capabilities: inspectCapabilities(),
