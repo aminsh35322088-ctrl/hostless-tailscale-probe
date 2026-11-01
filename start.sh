@@ -16,7 +16,7 @@ trap cleanup INT TERM EXIT
 
 rm -f "$TS_SOCKET" "$TS_STATE"
 
-echo "HOSTLESS_TAILSCALE_USERSpace_START"
+echo "HOSTLESS_TAILSCALE_USERSPACE_START"
 tailscaled \
   --tun=userspace-networking \
   --state="$TS_STATE" \
@@ -46,6 +46,24 @@ fi
 
 echo "TAILSCALE_DAEMON_READY"
 tailscale version || true
+
+if [ "${TS_JOIN:-false}" = "true" ]; then
+  if [ -z "${TS_AUTHKEY:-}" ]; then
+    echo "TS_JOIN=true but TS_AUTHKEY is missing"
+    exit 1
+  fi
+
+  echo "TAILSCALE_JOIN_BEGIN"
+  tailscale --socket="$TS_SOCKET" up \
+    --auth-key="$TS_AUTHKEY" \
+    --hostname="${TS_HOSTNAME:-hostless-exit}" \
+    --advertise-exit-node \
+    --accept-dns=false
+  echo "TAILSCALE_JOIN_COMPLETE"
+else
+  echo "TAILSCALE_JOIN_SKIPPED (set TS_JOIN=true and TS_AUTHKEY in Hostless App environment to join)"
+fi
+
 echo "TAILSCALE_STATUS_BEGIN"
 tailscale --socket="$TS_SOCKET" status --json 2>&1 || true
 echo "TAILSCALE_STATUS_END"
