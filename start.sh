@@ -2,7 +2,7 @@
 set -eu
 
 TS_SOCKET="/tmp/tailscaled.sock"
-TS_STATE="/tmp/tailscaled.state"
+TS_STATE_DIR="${TS_STATE_DIR:-/data/tailscale}"
 TS_PID=""
 APP_PID=""
 
@@ -14,7 +14,19 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-rm -f "$TS_SOCKET" "$TS_STATE"
+# Keep the Tailscale identity on Hostless' attached persistent volume.
+# Until /data is mounted, gracefully fall back to /tmp and make that explicit.
+if mkdir -p "$TS_STATE_DIR" 2>/dev/null &&
+   (umask 077; : > "$TS_STATE_DIR/.write-test-$$") 2>/dev/null; then
+  rm -f "$TS_STATE_DIR/.write-test-$$"
+  TS_STATE="$TS_STATE_DIR/tailscaled.state"
+  echo "TAILSCALE_STATE_MODE=persistent PATH=$TS_STATE"
+else
+  TS_STATE="/tmp/tailscaled.state"
+  echo "WARNING: TAILSCALE_STATE_MODE=ephemeral-fallback; attach a writable persistent volume at /data"
+fi
+
+rm -f "$TS_SOCKET"
 
 echo "HOSTLESS_TAILSCALE_USERSPACE_START"
 tailscaled \
