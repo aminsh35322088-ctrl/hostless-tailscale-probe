@@ -53,12 +53,18 @@ if [ "${TS_JOIN:-false}" = "true" ]; then
     exit 1
   fi
 
-  echo "TAILSCALE_JOIN_BEGIN"
-  tailscale --socket="$TS_SOCKET" up \
+  set -- \
     --auth-key="$TS_AUTHKEY" \
     --hostname="${TS_HOSTNAME:-hostless-exit}" \
     --advertise-exit-node \
     --accept-dns=false
+
+  if [ -n "${TS_ADVERTISE_TAGS:-}" ]; then
+    set -- "$@" --advertise-tags="$TS_ADVERTISE_TAGS"
+  fi
+
+  echo "TAILSCALE_JOIN_BEGIN"
+  tailscale --socket="$TS_SOCKET" up "$@"
   echo "TAILSCALE_JOIN_COMPLETE"
 else
   echo "TAILSCALE_JOIN_SKIPPED (set TS_JOIN=true and TS_AUTHKEY in Hostless App environment to join)"
