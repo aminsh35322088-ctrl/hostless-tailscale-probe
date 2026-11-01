@@ -1,8 +1,11 @@
 #!/bin/sh
 set -eu
+umask 077
 
 TS_SOCKET="/tmp/tailscaled.sock"
-TS_STATE_DIR="${TS_STATE_DIR:-/data/tailscale}"
+TS_STATE_DIR="/data/tailscale"
+TS_STATE="$TS_STATE_DIR/tailscaled.state"
+TS_NODE_NAME="hostless-exit-1"
 TS_PID=""
 APP_PID=""
 
@@ -14,20 +17,29 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-# Keep the Tailscale identity on Hostless' attached persistent volume.
-# Until /data is mounted, gracefully fall back to /tmp and make that explicit.
-if mkdir -p "$TS_STATE_DIR" 2>/dev/null &&
-   (umask 077; : > "$TS_STATE_DIR/.write-test-$$") 2>/dev/null; then
-  rm -f "$TS_STATE_DIR/.write-test-$$"
-  TS_STATE="$TS_STATE_DIR/tailscaled.state"
-  echo "TAILSCALE_STATE_MODE=persistent PATH=$TS_STATE"
-else
-  TS_STATE="/tmp/tailscaled.state"
-  echo "WARNING: TAILSCALE_STATE_MODE=ephemeral-fallback; attach a writable persistent volume at /data"
+# Do not create a disposable Tailnet identity. The Hostless volume must be
+# mounted at /data so the same node key survives process restarts and deploys.
+if ! awk '$5 == "/data" { found = 1 } END { exit(found ? 0 : 1) }' /proc/self/mountinfo; then
+  echo "FATAL: PERSISTENT_VOLUME_NOT_MOUNTED at /data; refusing to authenticate with ephemeral state"
+  exit 1
 fi
 
-rm -f "$TS_SOCKET"
+if ! mkdir -p "$TS_STATE_DIR" || ! (umask 077; : > "$TS_STATE_DIR/.write-test-$$"); then
+  echo "FATAL: PERSISTENT_STATE_PATH_NOT_WRITABLE: $TS_STATE_DIR"
+  exit 1
+fi
+rm -f "$TS_STATE_DIR/.write-test-$$"
 
+if [ -z "${TS_AUTHKEY:-}" ]; then
+  echo "FATAL: TS_AUTHKEY is missing"
+  exit 1
+fi
+
+if [ "${TS_HOSTNAME:-}" != "$TS_NODE_NAME" ]; then
+  echo "NOTICE: enforcing unique Tailnet hostname $TS_NODE_NAME (TS_HOSTNAME is intentionally not allowed to create a duplicate)"
+fi
+
+echo "TAILSCALE_STATE_MODE=persistent PATH=$TS_STATE"
 echo "HOSTLESS_TAILSCALE_USERSPACE_START"
 tailscaled \
   --tun=userspace-networking \
@@ -57,30 +69,23 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 echo "TAILSCALE_DAEMON_READY"
-tailscale version || true
+tailscale version
 
-if [ "${TS_JOIN:-false}" = "true" ]; then
-  if [ -z "${TS_AUTHKEY:-}" ]; then
-    echo "TS_JOIN=true but TS_AUTHKEY is missing"
-    exit 1
-  fi
+# The reusable auth key is supplied only through Hostless runtime secrets.
+# Keep the name and tag stable; persist the daemon state to reuse this device.
+echo "TAILSCALE_JOIN_BEGIN hostname=$TS_NODE_NAME tag=tag:exit"
+tailscale --socket="$TS_SOCKET" up \
+  --auth-key="$TS_AUTHKEY" \
+  --hostname="$TS_NODE_NAME" \
+  --advertise-exit-node \
+  --advertise-tags=tag:exit \
+  --accept-dns=false \
+  --accept-routes=false
+echo "TAILSCALE_JOIN_COMPLETE"
 
-  set -- \
-    --auth-key="$TS_AUTHKEY" \
-    --hostname="${TS_HOSTNAME:-hostless-exit}" \
-    --advertise-exit-node \
-    --accept-dns=false
-
-  if [ -n "${TS_ADVERTISE_TAGS:-}" ]; then
-    set -- "$@" --advertise-tags="$TS_ADVERTISE_TAGS"
-  fi
-
-  echo "TAILSCALE_JOIN_BEGIN"
-  tailscale --socket="$TS_SOCKET" up "$@"
-  echo "TAILSCALE_JOIN_COMPLETE"
-else
-  echo "TAILSCALE_JOIN_SKIPPED (set TS_JOIN=true and TS_AUTHKEY in Hostless App environment to join)"
-fi
+echo "TAILSCALE_NETCHECK_BEGIN"
+tailscale --socket="$TS_SOCKET" netcheck 2>&1 || true
+echo "TAILSCALE_NETCHECK_END"
 
 echo "TAILSCALE_STATUS_BEGIN"
 tailscale --socket="$TS_SOCKET" status --json 2>&1 || true
