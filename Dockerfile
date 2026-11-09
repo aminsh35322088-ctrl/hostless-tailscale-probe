@@ -1,18 +1,35 @@
-FROM alpine:3.22 AS tailscale-download
-RUN apk add --no-cache curl tar
-RUN mkdir -p /out && \
-    curl -fsSL https://pkgs.tailscale.com/stable/tailscale_1.104.4_amd64.tgz | \
-    tar -xzf - --strip-components=1 -C /out && \
-    chmod 0755 /out/tailscale /out/tailscaled
+FROM alpine:3.22 AS downloads
+RUN apk add --no-cache ca-certificates curl tar
+WORKDIR /tmp/downloads
+
+# Official Hiddify Core v5.0.3 (Linux amd64, musl).
+RUN curl -fsSL --retry 3 \
+      -o hiddify-core.tar.gz \
+      https://github.com/hiddify/hiddify-core/releases/download/v5.0.3/hiddify-core-linux-amd64-musl.tar.gz \
+    && echo "9e6f703e4c529e0d184c88f4fdd72c4a8461f40011dcc3414bd91e8fe4152b78  hiddify-core.tar.gz" | sha256sum -c - \
+    && mkdir hiddify \
+    && tar -xzf hiddify-core.tar.gz --strip-components=1 -C hiddify \
+    && test -x hiddify/hiddify-core
+
+# Official Cloudflare cloudflared v2026.10.7 (Linux amd64).
+RUN curl -fsSL --retry 3 \
+      -o cloudflared \
+      https://github.com/cloudflare/cloudflared/releases/download/2026.10.7/cloudflared-linux-amd64 \
+    && echo "1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872  cloudflared" | sha256sum -c - \
+    && chmod 0755 cloudflared
 
 FROM node:22-alpine
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
-COPY --from=tailscale-download /out/tailscale /usr/local/bin/tailscale
-COPY --from=tailscale-download /out/tailscaled /usr/local/bin/tailscaled
-COPY probe.js ./probe.js
-COPY start.sh ./start.sh
-RUN chmod 0755 /app/start.sh
+
+COPY --from=downloads /tmp/downloads/hiddify/hiddify-core /usr/local/bin/hiddify-core
+COPY --from=downloads /tmp/downloads/cloudflared /usr/local/bin/cloudflared
+COPY start.sh make-config.js health.js ./
+
+RUN chmod 0755 /app/start.sh \
+    && hiddify-core version \
+    && cloudflared --version
+
 ENV NODE_ENV=production
-EXPOSE 8080
+EXPOSE 8000
 CMD ["/app/start.sh"]
