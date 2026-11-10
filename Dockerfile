@@ -2,11 +2,11 @@ FROM alpine:3.22 AS downloads
 RUN apk add --no-cache ca-certificates curl tar
 WORKDIR /tmp/downloads
 
-# Official Hiddify Core v5.0.3 (Linux amd64, musl).
+# Official Hiddify Core v5.5.5 (Linux amd64, musl).
 RUN curl -fsSL --retry 3 \
       -o hiddify-core.tar.gz \
-      https://github.com/hiddify/hiddify-core/releases/download/v5.0.3/hiddify-core-linux-amd64-musl.tar.gz \
-    && echo "9e6f703e4c529e0d184c88f4fdd72c4a8461f40011dcc3414bd91e8fe4152b78  hiddify-core.tar.gz" | sha256sum -c - \
+      https://github.com/hiddify/hiddify-core/releases/download/v5.5.5/hiddify-core-linux-amd64-musl.tar.gz \
+    && echo "837f73a35eb4c629ba63a7e083b124533197f475d8defd950f3175d658e7a541  hiddify-core.tar.gz" | sha256sum -c - \
     && mkdir hiddify \
     && tar -xzf hiddify-core.tar.gz --strip-components=1 -C hiddify \
     && test -x hiddify/hiddify-core

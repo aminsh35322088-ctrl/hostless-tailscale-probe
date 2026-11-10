@@ -1,44 +1,52 @@
 # Hostless Cloudflare Tunnel + Hiddify Core
 
-This branch is a separate Hostless app. It does not change the existing
+This branch deploys a separate Hostless app. It does not change the existing
 `hostless-tailscale-stable` service.
 
-## Runtime design
+## Runtime
 
-- Hiddify Core v5.0.3 serves one VLESS + WebSocket inbound on
-  `127.0.0.1:8081`.
-- cloudflared connects outbound to a separately managed Cloudflare Tunnel.
-- The Cloudflare public hostname routes to `http://127.0.0.1:8081`.
-- Hostless health checks use a small HTTP endpoint on `$PORT` (default 8000).
-- No persistent volume is needed. Credentials and the generated Hiddify
-  configuration live only in runtime environment variables and ephemeral
-  storage.
+- Hiddify Core **v5.5.5**, official Linux amd64/musl release.
+- Hiddify sing-box **1.15.0-alpha.13** (reported by the pinned binary).
+- cloudflared **2026.10.7**.
+- One dedicated Cloudflare Tunnel and hostname: `ws.janfada.cc.cd`.
+- No persistent volume; credentials and the generated config remain in runtime
+  environment variables and ephemeral storage.
 
-## Required runtime environment variables
+## Inbounds and Cloudflare routes
 
-Set these as write-only Hostless secrets:
+| Profile | Protocol | Transport | Local listener |
+|---|---|---|---:|
+| VLESS-WS | VLESS | WebSocket + TLS at Cloudflare | 127.0.0.1:8081 |
+| VMess-WS | VMess | WebSocket + TLS at Cloudflare | 127.0.0.1:8082 |
+| Trojan-WS | Trojan | WebSocket + TLS at Cloudflare | 127.0.0.1:8083 |
+| VLESS-XHTTP | VLESS | XHTTP packet-up + TLS at Cloudflare | 127.0.0.1:8084 |
 
-- `CF_TUNNEL_TOKEN`: token for this app's dedicated Cloudflare Tunnel.
-- `CF_HOSTNAME`: public hostname configured on that tunnel.
-- `VLESS_UUID`: VLESS user UUID.
-- `WS_PATH`: a long, unguessable WebSocket path beginning with `/`.
+Cloudflare Tunnel ingress uses path-based routing on the same hostname. The
+subscription endpoint is served by the Hostless app at
+`/sub/<SUBSCRIPTION_TOKEN>` and returns base64-encoded Hiddify share links.
 
-Never commit tunnel tokens, UUIDs, or WebSocket paths to this repository.
+## Runtime secrets
 
-## Client profile
+The Hostless app stores these as write-only environment variables:
+- `CF_TUNNEL_TOKEN`, `CF_HOSTNAME`
+- `VLESS_UUID`, `WS_PATH`
+- `VMESS_UUID`, `VMESS_WS_PATH`
+- `TROJAN_PASSWORD`, `TROJAN_WS_PATH`
+- `XHTTP_PATH`, `SUBSCRIPTION_TOKEN`
 
-Use VLESS over WebSocket with TLS enabled:
-- address: `CF_HOSTNAME`
-- port: `443`
-- transport: `ws`
-- WebSocket path: `WS_PATH`
-- TLS server name: same as `CF_HOSTNAME`
-- encryption: `none`
-- flow: empty
+Never commit tunnel credentials, UUIDs, passwords, subscription tokens, or
+private WebSocket/XHTTP paths to this repository.
 
-## Limitations
+## Compatibility limits
 
-Cloudflare Tunnel is an edge-mediated path, not a direct P2P connection or a
-replacement for Tailscale's native DERP protocol. This branch is intended to
-test a Cloudflare-fronted VLESS/WebSocket access path. UDP-based protocols
-such as TUIC and Hysteria2 are not provided by this WebSocket inbound.
+This app intentionally publishes only transports that can use the HTTP-based
+Cloudflare Tunnel ingress. WebSocket profiles are proxied as HTTP WebSocket
+upgrades. XHTTP uses packet-up mode so upload is carried by ordinary HTTP
+requests. Hysteria2, TUIC, mKCP, raw UDP, WireGuard and other UDP/native-TCP
+listeners are not included in this Cloudflare subscription; core support for
+a protocol does not make Cloudflare Tunnel transparently forward that protocol.
+
+This is an edge-mediated Cloudflare route, not direct P2P and not a native
+Tailscale DERP replacement. The previous VLESS WebSocket handshake test
+returned HTTP 101, but a real client data-transfer test remains the acceptance
+test for every profile.
