@@ -2,113 +2,68 @@
 set -eu
 umask 077
 
-TS_SOCKET="/tmp/tailscaled.sock"
-TS_PID=""
-APP_PID=""
+: "${CF_TUNNEL_TOKEN:?CF_TUNNEL_TOKEN is required}"
+: "${CF_HOSTNAME:?CF_HOSTNAME is required}"
+: "${VLESS_UUID:?VLESS_UUID is required}"
+: "${WS_PATH:?WS_PATH is required}"
 
-cleanup() {
+node /app/make-config.js
+echo "HIDDIFY_CORE_VERSION_BEGIN"
+hiddify-core version
+echo "HIDDIFY_CORE_VERSION_END"
+echo "CLOUDFLARED_VERSION_BEGIN"
+cloudflared --version
+echo "CLOUDFLARED_VERSION_END"
+
+HIDDIFY_PID=""
+CLOUDFLARED_PID=""
+HEALTH_PID=""
+
+shutdown() {
   trap - EXIT INT TERM
-
-  if [ -n "$APP_PID" ]; then
-    kill -TERM "$APP_PID" 2>/dev/null || true
-  fi
-
-  if [ -n "$TS_PID" ] && kill -0 "$TS_PID" 2>/dev/null; then
-    echo "TAILSCALE_EPHEMERAL_LOGOUT_BEGIN"
-    tailscale --socket="$TS_SOCKET" logout >/dev/null 2>&1 || true
-    kill -TERM "$TS_PID" 2>/dev/null || true
-  fi
-
-  if [ -n "$APP_PID" ]; then
-    wait "$APP_PID" 2>/dev/null || true
-  fi
-  if [ -n "$TS_PID" ]; then
-    wait "$TS_PID" 2>/dev/null || true
-  fi
-
+  for pid in "$HEALTH_PID" "$CLOUDFLARED_PID" "$HIDDIFY_PID"; do
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "$HEALTH_PID" "$CLOUDFLARED_PID" "$HIDDIFY_PID"; do
+    if [ -n "$pid" ]; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
   echo "SHUTDOWN_COMPLETE"
 }
-trap cleanup EXIT
-trap 'exit 0' INT TERM
+trap shutdown EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
-if [ -z "${TS_AUTHKEY:-}" ]; then
-  echo "FATAL: TS_AUTHKEY is missing"
-  exit 1
-fi
+echo "HIDDIFY_START_BEGIN"
+hiddify-core --disable-color srun -c /tmp/hiddify-config.json &
+HIDDIFY_PID=$!
 
-if [ -z "${TS_HOSTNAME:-}" ]; then
-  echo "FATAL: TS_HOSTNAME is missing"
-  exit 1
-fi
+echo "CLOUDFLARED_TUNNEL_START_BEGIN hostname=$CF_HOSTNAME"
+TUNNEL_TOKEN="$CF_TUNNEL_TOKEN" cloudflared tunnel --no-autoupdate run &
+CLOUDFLARED_PID=$!
 
-# Accept a single DNS hostname label only; never substitute a baked-in name.
-case "$TS_HOSTNAME" in
-  *[!A-Za-z0-9-]*|-*|*-)
-    echo "FATAL: TS_HOSTNAME must be a DNS hostname label (letters, digits and hyphens; no leading/trailing hyphen)"
-    exit 1
-    ;;
-esac
+node /app/health.js &
+HEALTH_PID=$!
 
-TS_HOSTNAME_LENGTH=$(printf '%s' "$TS_HOSTNAME" | wc -c | tr -d '[:space:]')
-if [ "$TS_HOSTNAME_LENGTH" -gt 63 ]; then
-  echo "FATAL: TS_HOSTNAME exceeds 63 characters"
-  exit 1
-fi
-
-echo "TAILSCALE_STATE_MODE=ephemeral-memory no_volume_required"
-echo "TAILSCALE_HOSTNAME_SOURCE=TS_HOSTNAME hostname=$TS_HOSTNAME"
-echo "HOSTLESS_TAILSCALE_USERSPACE_START"
-
-# mem: makes this an ephemeral Tailscale node without writing identity state to disk.
-tailscaled \
-  --tun=userspace-networking \
-  --state=mem: \
-  --socket="$TS_SOCKET" &
-TS_PID=$!
-
-ready=0
-i=0
-while [ "$i" -lt 30 ]; do
-  if ! kill -0 "$TS_PID" 2>/dev/null; then
-    echo "TAILSCALED_EXITED_EARLY"
-    wait "$TS_PID" || true
+echo "SERVICE_PROCESSES_STARTED"
+while :; do
+  if ! kill -0 "$HIDDIFY_PID" 2>/dev/null; then
+    echo "FATAL: HIDDIFY_CORE_EXITED"
+    wait "$HIDDIFY_PID" || true
     exit 1
   fi
-  if [ -S "$TS_SOCKET" ]; then
-    ready=1
-    break
+  if ! kill -0 "$CLOUDFLARED_PID" 2>/dev/null; then
+    echo "FATAL: CLOUDFLARED_EXITED"
+    wait "$CLOUDFLARED_PID" || true
+    exit 1
   fi
-  i=$((i + 1))
-  sleep 1
+  if ! kill -0 "$HEALTH_PID" 2>/dev/null; then
+    echo "FATAL: HEALTH_SERVER_EXITED"
+    wait "$HEALTH_PID" || true
+    exit 1
+  fi
+  sleep 3
 done
-
-if [ "$ready" -ne 1 ]; then
-  echo "TAILSCALED_SOCKET_TIMEOUT"
-  exit 1
-fi
-
-echo "TAILSCALE_DAEMON_READY"
-tailscale version
-
-# Credentials are read only from Hostless runtime secrets and never logged.
-echo "TAILSCALE_JOIN_BEGIN hostname=$TS_HOSTNAME tag=tag:exit"
-tailscale --socket="$TS_SOCKET" up \
-  --auth-key="$TS_AUTHKEY" \
-  --hostname="$TS_HOSTNAME" \
-  --advertise-exit-node \
-  --advertise-tags=tag:exit \
-  --accept-dns=false \
-  --accept-routes=false
-echo "TAILSCALE_JOIN_COMPLETE"
-
-echo "TAILSCALE_NETCHECK_BEGIN"
-tailscale --socket="$TS_SOCKET" netcheck 2>&1 || true
-echo "TAILSCALE_NETCHECK_END"
-
-echo "TAILSCALE_STATUS_BEGIN"
-tailscale --socket="$TS_SOCKET" status --json 2>&1 || true
-echo "TAILSCALE_STATUS_END"
-
-node /app/probe.js &
-APP_PID=$!
-wait "$APP_PID"

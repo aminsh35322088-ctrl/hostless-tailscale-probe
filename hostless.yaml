@@ -1,8 +1,15 @@
 build:
   system: docker
-
 dockerfile_path: "./Dockerfile"
+
+scaling:
+  min_cpu: 0.05
+  max_cpu: 0.15
+  min_memory: 384
+  max_memory: 640
+  min_replicas: 1
+  max_replicas: 1
 
 health_check:
   type: http
-  http_path: "/"
+  http_path: "/healthz"
